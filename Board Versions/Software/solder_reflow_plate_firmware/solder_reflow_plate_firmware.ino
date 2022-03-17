@@ -149,52 +149,56 @@ void showLogo() {
     delay(3000);
 }
 
-enum menu_state_t {
-    MENU_IDLE,
-    MENU_HEAT,
-    MENU_CANCELLED,
-    MENU_COOLDOWN,
-    MENU_COMPLETED,
-    MENU_INC_TEMP,
-    MENU_DEC_TEMP
-};
+enum menu_state_t { MENU_IDLE, MENU_HEAT, MENU_INC_TEMP, MENU_DEC_TEMP };
 
 enum buttons_state_t { BUTTONS_NO_PRESS, BUTTONS_BOTH_PRESS, BUTTONS_UP_PRESS, BUTTONS_DN_PRESS };
 
 void mainMenu() {
     // Debounce
-    while (!digitalRead(upsw) || !digitalRead(dnsw)) {
-    }
+    while (!digitalRead(upsw) || !digitalRead(dnsw))
+        ;
+    menu_state_t cur_state = MENU_IDLE;
 
     int x = 0;   // Display change counter
     int y = 200; // Display change max (modulused below)
     while (1) {
-        analogWrite(mosfet, 0); // Ensure MOSFET off
-        clear_main_menu();
+        switch (cur_state) {
+        case MENU_IDLE: {
+            analogWrite(mosfet, 0); // Ensure MOSFET off
+            clear_main_menu();
+            buttons_state_t cur_button = getButtonsState();
 
-        // Button Logic
-        if (!digitalRead(upsw) || !digitalRead(dnsw)) { // If either button pressed
-            delay(100);
-            // if both buttons pressed, enter heating
-            if (!digitalRead(upsw) && !digitalRead(dnsw)) { // If both buttons pressed
-                if (!heat(maxTempArray[maxTempIndex])) {
-                    cancelledPB();
-                    mainMenu();
-                } else {
-                    coolDown();
-                    completed();
-                    mainMenu();
-                }
+            if (cur_button == BUTTONS_BOTH_PRESS) {
+                cur_state = MENU_HEAT;
+            } else if (cur_button == BUTTONS_UP_PRESS) {
+                cur_state = MENU_INC_TEMP;
+            } else if (cur_button == BUTTONS_DN_PRESS) {
+                cur_state = MENU_DEC_TEMP;
             }
-            if (!digitalRead(upsw) &&
-                maxTempIndex < sizeof(maxTempArray) - 1) { // If upper button pressed
+        } break;
+        case MENU_HEAT: {
+            if (!heat(maxTempArray[maxTempIndex])) {
+                cancelledPB();
+            } else {
+                coolDown();
+                completed();
+            }
+            cur_state = MENU_IDLE;
+        } break;
+        case MENU_INC_TEMP: {
+            if (maxTempIndex < sizeof(maxTempArray) - 1) {
                 maxTempIndex++;
                 EEPROM.update(tempIndexAddr, maxTempIndex);
             }
-            if (!digitalRead(dnsw) && maxTempIndex > 0) { // If lower button pressed
+            cur_state = MENU_IDLE;
+        } break;
+        case MENU_DEC_TEMP: {
+            if (maxTempIndex > 0) {
                 maxTempIndex--;
                 EEPROM.update(tempIndexAddr, maxTempIndex);
             }
+            cur_state = MENU_IDLE;
+        } break;
         }
 
         // Change Display (left-side)
@@ -205,7 +209,7 @@ void mainMenu() {
     }
 }
 
-buttons_state_t getButtonState() {
+buttons_state_t getButtonsState() {
     if (digitalRead(upsw) && digitalRead(dnsw)) {
         return BUTTONS_NO_PRESS;
     } else {
@@ -322,8 +326,8 @@ bool heat(byte maxTemp) {
             } // Slowly ramp to desired PWM Value
             if (v < vMin && pwmVal > 1) {
                 pwmVal = pwmVal - 2;
-            } // Reduce PWM Value if V drops too low but not unless it is still above 1 (avoid
-              // overflow/underflow)
+            }    // Reduce PWM Value if V drops too low but not unless it is still above 1 (avoid
+                 // overflow/underflow)
         } else { // Heating Complete, return
             analogWrite(mosfet, 0);
             break;

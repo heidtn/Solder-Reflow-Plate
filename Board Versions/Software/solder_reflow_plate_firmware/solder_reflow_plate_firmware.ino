@@ -45,9 +45,13 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1); // Create Disp
 #define temp 16 // A2
 #define vcc 14  // A0
 
+
+enum menu_state_t { MENU_IDLE, MENU_HEAT, MENU_INC_TEMP, MENU_DEC_TEMP };
+enum buttons_state_t { BUTTONS_NO_PRESS, BUTTONS_BOTH_PRESS, BUTTONS_UP_PRESS, BUTTONS_DN_PRESS };
+
 // Temperature Info
-byte maxTempArray[] = {140, 150, 160, 170, 180};
-byte maxTempIndex = 0;
+byte max_temp_array[] = {140, 150, 160, 170, 180};
+byte max_temp_index = 0;
 byte tempIndexAddr = 1;
 
 // Voltage Measurement Info
@@ -104,6 +108,14 @@ static const uint8_t PROGMEM tick[] = {
 static const uint8_t tick_width = 16;
 static const uint8_t tick_height = 15;
 
+// -------------------- Function prototypes -----------------------------------
+void inline heatAnimate(int &x, int &y, float v, float t);
+
+
+
+
+// -------------------- Function definitions ----------------------------------
+
 void setup() {
 
     // Pin Direction control
@@ -115,7 +127,7 @@ void setup() {
     pinMode(vcc, INPUT);
 
     // Pull saved values from EEPROM
-    maxTempIndex = EEPROM.read(tempIndexAddr) % sizeof(maxTempArray);
+    max_temp_index = EEPROM.read(tempIndexAddr) % sizeof(max_temp_array);
 
     // Enable Fast PWM with no prescaler
     setFastPwm();
@@ -149,9 +161,6 @@ void showLogo() {
     delay(3000);
 }
 
-enum menu_state_t { MENU_IDLE, MENU_HEAT, MENU_INC_TEMP, MENU_DEC_TEMP };
-
-enum buttons_state_t { BUTTONS_NO_PRESS, BUTTONS_BOTH_PRESS, BUTTONS_UP_PRESS, BUTTONS_DN_PRESS };
 
 void mainMenu() {
     // Debounce
@@ -165,7 +174,7 @@ void mainMenu() {
         switch (cur_state) {
         case MENU_IDLE: {
             analogWrite(mosfet, 0); // Ensure MOSFET off
-            clear_main_menu();
+            clearMainMenu();
             buttons_state_t cur_button = getButtonsState();
 
             if (cur_button == BUTTONS_BOTH_PRESS) {
@@ -177,7 +186,7 @@ void mainMenu() {
             }
         } break;
         case MENU_HEAT: {
-            if (!heat(maxTempArray[maxTempIndex])) {
+            if (!heat(max_temp_array[max_temp_index])) {
                 cancelledPB();
             } else {
                 coolDown();
@@ -186,29 +195,30 @@ void mainMenu() {
             cur_state = MENU_IDLE;
         } break;
         case MENU_INC_TEMP: {
-            if (maxTempIndex < sizeof(maxTempArray) - 1) {
-                maxTempIndex++;
-                EEPROM.update(tempIndexAddr, maxTempIndex);
+            if (max_temp_index < sizeof(max_temp_array) - 1) {
+                max_temp_index++;
+                EEPROM.update(tempIndexAddr, max_temp_index);
             }
             cur_state = MENU_IDLE;
         } break;
         case MENU_DEC_TEMP: {
-            if (maxTempIndex > 0) {
-                maxTempIndex--;
-                EEPROM.update(tempIndexAddr, maxTempIndex);
+            if (max_temp_index > 0) {
+                max_temp_index--;
+                EEPROM.update(tempIndexAddr, max_temp_index);
             }
             cur_state = MENU_IDLE;
         } break;
         }
 
         // Change Display (left-side)
-        show_main_menu_left(x, y);
+        showMainMenuLeft(x, y);
 
         // Update Display (right-side)
-        show_main_menu_right();
+        showMainMenuRight();
     }
 }
 
+// TODO(HEIDT) change to a down-up model or we'll loop forever in these cases
 buttons_state_t getButtonsState() {
     if (digitalRead(upsw) && digitalRead(dnsw)) {
         return BUTTONS_NO_PRESS;
@@ -222,15 +232,20 @@ buttons_state_t getButtonsState() {
             return BUTTONS_DN_PRESS;
         }
     }
+
+    // wait for up on both switches
+    // TODO(HEIDT) holding down switches will block execution flow, address
+    while (!digitalRead(upsw) || !digitalRead(dnsw))
+        ;
 }
 
-inline void clear_main_menu() {
+inline void clearMainMenu() {
     display.clearDisplay();
     display.setTextSize(1);
     display.drawRoundRect(0, 0, 83, 32, 2, SSD1306_WHITE);
 }
 
-inline void show_main_menu_left(int &x, int &y) {
+inline void showMainMenuLeft(int &x, int &y) {
     if (x < (y * 0.5)) {
         display.setCursor(3, 4);
         display.print(F("PRESS BUTTONS"));
@@ -249,43 +264,47 @@ inline void show_main_menu_left(int &x, int &y) {
     x = (x + 1) % y; // Display change increment and modulus
 }
 
-inline void show_main_menu_right() {
+inline void showMainMenuRight() {
     display.setCursor(95, 6);
     display.print(F("TEMP"));
     display.setCursor(95, 18);
-    display.print(maxTempArray[maxTempIndex]);
+    display.print(max_temp_array[max_temp_index]);
     display.print(F("C"));
     display.display();
 }
 
-bool heat(byte maxTemp) {
-    // Debounce
-    while (!digitalRead(upsw) || !digitalRead(dnsw)) {
-    }
-
-    // Heating Display
+inline void showHeatMenu(byte max_temp) {
     display.clearDisplay();
     display.setTextSize(2);
     display.setCursor(22, 4);
     display.print(F("HEATING"));
     display.setTextSize(1);
     display.setCursor(52, 24);
-    display.print(maxTemp);
+    display.print(max_temp);
     display.print(F("C"));
     display.display();
+}
+
+bool heat(byte max_temp) {
+    // Debounce
+    while (!digitalRead(upsw) || !digitalRead(dnsw)) {
+    }
+
+    // Heating Display
+    showHeatMenu(max_temp);
     delay(3000);
 
     // Heater Control Variables
     /*  Heater follows industry reflow graph. Slow build-up to 'warmUp' temp. Rapid ascent
-     *  to 'maxTemp'. Then descent to room temperature.
+     *  to 'max_temp'. Then descent to room temperature.
      */
-    // byte maxTemp; //Declared in function call
-    byte maxPWM = 0.70 * maxTemp; // Temperatures (in PWM / 255) influenced by paste temperature
-    byte warmUpTemp = 0.75 * maxTemp;
-    byte warmUpPWM = 0.72 * warmUpTemp;
+    // byte max_temp; //Declared in function call
+    byte max_PWM = 0.70 * max_temp; // Temperatures (in PWM / 255) influenced by paste temperature
+    byte warmup_temp = 0.75 * max_temp;
+    byte warmup_PWM = 0.72 * warmup_temp;
     float t;         // Used to store current temperature
     float v;         // Used to store current voltage
-    byte pwmVal = 0; // PWM Value applied to MOSFET
+    byte pwm_val = 0; // PWM Value applied to MOSFET
     unsigned long eTime =
         (millis() / 1000) +
         (8 * 60); // Used to store the end time of the heating process, limited to 8 mins
@@ -296,7 +315,7 @@ bool heat(byte maxTemp) {
 
     while (1) {
         // Button Control
-        if (!digitalRead(upsw) || !digitalRead(dnsw)) {
+        if (getButtonsState() != BUTTONS_NO_PRESS) {
             analogWrite(mosfet, 0);
             return 0;
         }
@@ -305,6 +324,7 @@ bool heat(byte maxTemp) {
         if (millis() / 1000 > eTime) {
             analogWrite(mosfet, 0);
             cancelledTimer();
+            return 0;
         }
 
         // Measure Values
@@ -312,66 +332,67 @@ bool heat(byte maxTemp) {
         v = getVolts();
 
         // Reflow Profile
-        if (t < warmUpTemp) { // Warm Up Section
-            if (pwmVal != warmUpPWM) {
-                pwmVal++;
+        if (t < warmup_temp) { // Warm Up Section
+            if (pwm_val != warmup_PWM) {
+                pwm_val++;
             } // Slowly ramp to desired PWM Value
-            if (v < vMin && pwmVal > 1) {
-                pwmVal = pwmVal - 2;
+            if (v < vMin && pwm_val > 1) {
+                pwm_val = pwm_val - 2;
             } // Reduce PWM Value if V drops too low but not unless it is still above 1 (avoid
               // overflow/underflow)
-        } else if (t < maxTemp) { // Push to maximum temp
-            if (pwmVal != maxPWM) {
-                pwmVal++;
+        } else if (t < max_temp) { // Push to maximum temp
+            if (pwm_val != max_PWM) {
+                pwm_val++;
             } // Slowly ramp to desired PWM Value
-            if (v < vMin && pwmVal > 1) {
-                pwmVal = pwmVal - 2;
+            if (v < vMin && pwm_val > 1) {
+                pwm_val = pwm_val - 2;
             }    // Reduce PWM Value if V drops too low but not unless it is still above 1 (avoid
                  // overflow/underflow)
         } else { // Heating Complete, return
             analogWrite(mosfet, 0);
-            break;
+            return 1;
         }
-        if (pwmVal > maxPWM) {
-            pwmVal = maxPWM;
+        if (pwm_val > max_PWM) {
+            pwm_val = max_PWM;
         } // Catch incase of runaway
 
+        heatAnimate(x, y, v, t);
+
         // MOSFET Control
-        analogWrite(mosfet, pwmVal);
-
-        // Heat Animate Control
-        display.clearDisplay();
-        display.drawBitmap(0, 3, heat_animate, heat_animate_width, heat_animate_height,
-                           SSD1306_WHITE);
-        display.drawBitmap(112, 3, heat_animate, heat_animate_width, heat_animate_height,
-                           SSD1306_WHITE);
-        display.fillRect(0, 3, heat_animate_width, heat_animate_height * (y - x) / y,
-                         SSD1306_BLACK);
-        display.fillRect(112, 3, heat_animate_width, heat_animate_height * (y - x) / y,
-                         SSD1306_BLACK);
-        x = (x + 1) % y; // Heat animate increment and modulus
-
-        // Update display
-        display.setTextSize(2);
-        display.setCursor(22, 4);
-        display.print(F("HEATING"));
-        display.setTextSize(1);
-        display.setCursor(20, 24);
-        display.print(F("~"));
-        display.print(v, 1);
-        display.print(F("V"));
-        if (t >= 100) {
-            display.setCursor(78, 24);
-        } else if (t >= 10) {
-            display.setCursor(81, 24);
-        } else {
-            display.setCursor(84, 24);
-        }
-        display.print(F("~"));
-        display.print(t, 0);
-        display.print(F("C"));
-        display.display();
+        analogWrite(mosfet, pwm_val);
     }
+}
+
+void inline heatAnimate(int &x, int &y, float v, float t) {
+    // Heat Animate Control
+    display.clearDisplay();
+    display.drawBitmap(0, 3, heat_animate, heat_animate_width, heat_animate_height, SSD1306_WHITE);
+    display.drawBitmap(112, 3, heat_animate, heat_animate_width, heat_animate_height,
+                       SSD1306_WHITE);
+    display.fillRect(0, 3, heat_animate_width, heat_animate_height * (y - x) / y, SSD1306_BLACK);
+    display.fillRect(112, 3, heat_animate_width, heat_animate_height * (y - x) / y, SSD1306_BLACK);
+    x = (x + 1) % y; // Heat animate increment and modulus
+
+    // Update display
+    display.setTextSize(2);
+    display.setCursor(22, 4);
+    display.print(F("HEATING"));
+    display.setTextSize(1);
+    display.setCursor(20, 24);
+    display.print(F("~"));
+    display.print(v, 1);
+    display.print(F("V"));
+    if (t >= 100) {
+        display.setCursor(78, 24);
+    } else if (t >= 10) {
+        display.setCursor(81, 24);
+    } else {
+        display.setCursor(84, 24);
+    }
+    display.print(F("~"));
+    display.print(t, 0);
+    display.print(F("C"));
+    display.display();
 }
 
 void cancelledPB() { // Cancelled via push button
@@ -400,8 +421,7 @@ void cancelledPB() { // Cancelled via push button
     delay(50);
 
     // Wait to return on any button press
-    while (digitalRead(upsw) && digitalRead(dnsw)) {
-    }
+    while(getButtonsState() == BUTTONS_NO_PRESS);
 }
 
 void cancelledTimer() { // Cancelled via 5 minute Time Limit
@@ -414,7 +434,7 @@ void cancelledTimer() { // Cancelled via 5 minute Time Limit
     int y = 150; // Display change max (modulused below)
 
     // Wait to return on any button press
-    while (digitalRead(upsw) && digitalRead(dnsw)) {
+    while (getButtonsState() == BUTTONS_NO_PRESS) {
         // Update Display
         display.clearDisplay();
         display.drawRoundRect(22, 0, 84, 32, 2, SSD1306_WHITE);
@@ -451,7 +471,6 @@ void cancelledTimer() { // Cancelled via 5 minute Time Limit
         display.display();
         delay(50);
     }
-    mainMenu();
 }
 
 void coolDown() {

@@ -1,8 +1,7 @@
-
 /* Solder Reflow Plate Sketch
  *  H/W - Ver 2.4
  *  S/W - Ver 1.0
- *  by Chris Halsall     */
+ *  by Chris Halsall and Nathan Heidt     */
 
 /* To prepare
  * 1) Install MiniCore in additional boards; (copy into File->Preferences->Additional Boards Manager URLs)
@@ -146,10 +145,21 @@ void setup() {
   maxTempIndex = EEPROM.read(tempIndexAddr) % sizeof(maxTempArray);
 
   //Enable Fast PWM with no prescaler
-  TCCR2A = _BV(COM2A1) | _BV(COM2B1) | _BV(WGM21) | _BV(WGM20);
-  TCCR2B = _BV(CS20);
+  setup_fast_pwm();
 
   //Start-up Diplay
+  show_logo();
+
+  //Go to main menu
+  main_menu();
+}
+
+inline void setup_fast_pwm() {
+  TCCR2A = _BV(COM2A1) | _BV(COM2B1) | _BV(WGM21) | _BV(WGM20);
+  TCCR2B = _BV(CS20);
+}
+
+void show_logo() {
   display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
   display.clearDisplay();
   display.setTextSize(1);
@@ -165,8 +175,6 @@ void setup() {
   display.display();
   delay(3000);
 
-  //Go to main menu
-  main_menu();
 }
 
 void main_menu() {
@@ -206,6 +214,14 @@ void main_menu() {
     }
 
     //Change Display (left-side)
+    show_main_menu_left(x, y);
+    
+    //Update Display (right-side)
+    show_main_menu_right();
+  }
+}
+
+inline void show_main_menu_left(int &x, int &y) {
     if( x < (y * 0.5)) {
       display.setCursor(3,4);
       display.print(F("PRESS BUTTONS"));
@@ -223,16 +239,18 @@ void main_menu() {
       display.print(F("Begin Heating"));
     }
     x = ( x + 1 ) % y; //Display change increment and modulus
-    
-    //Update Display (right-side)
+}
+
+inline void show_main_menu_right() {
     display.setCursor(95,6);
     display.print(F("TEMP"));
     display.setCursor(95,18);
     display.print(maxTempArray[maxTempIndex]);
     display.print(F("C"));
     display.display();
-  }
 }
+
+
 
 bool heat(byte maxTemp) {
   //Debounce

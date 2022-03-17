@@ -21,16 +21,24 @@
  *      Bootloader->No bootloader
  *  2) Set programmer of choice, e.g.'Arduino as ISP (MiniCore)', 'USB ASP', etc, and set correct
  * port. 3) Burn bootloader (to set fuses correctly) 4) Compile and upload
+ *
+ *
+ * TODOS:
+ * - add digital sensor setup routine if they are detected, but not setup
+ * - figure out a method for how to use all the temperature sensors
+ * - implement an observer/predictor for the temperature sensors.  Kalman filter time?!?
  */
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <DallasTemperature.h>
 #include <EEPROM.h>
+#include <OneWire.h>
 #include <SPI.h>
 
 // Version Definitions
 static const PROGMEM float hw = 2.4;
-static const PROGMEM float sw = 1.0;
+static const PROGMEM float sw = 2.0;
 
 // Screen Definitions
 #define SCREEN_WIDTH 128
@@ -39,11 +47,11 @@ static const PROGMEM float sw = 1.0;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1); // Create Display
 
 // Pin Definitions
-#define mosfet 3
-#define upsw 6
-#define dnsw 5
-#define temp 16 // A2
-#define vcc 14  // A0
+#define MOSFET_PIN 3
+#define UPSW_PIN 6
+#define DNSW_PIN 5
+#define TEMP_PIN 16 // A2
+#define VCC_PIN 14  // A0
 
 enum menu_state_t { MENU_IDLE, MENU_SELECT_PROFILE, MENU_HEAT, MENU_INC_TEMP, MENU_DEC_TEMP };
 enum buttons_state_t { BUTTONS_NO_PRESS, BUTTONS_BOTH_PRESS, BUTTONS_UP_PRESS, BUTTONS_DN_PRESS };
@@ -107,7 +115,6 @@ static const uint8_t PROGMEM tick[] = {
 static const uint8_t tick_width = 16;
 static const uint8_t tick_height = 15;
 
-
 // This needs to be specified or the compiler will fail as you can't initialize a
 // flexible array member in a nested context
 #define MAX_PROFILE_LENGTH 8
@@ -122,8 +129,7 @@ struct solder_profile_t {
 // TODO(HEIDT) how to adjust for environments where the board starts hot or cold?
 // profiles pulled from here: https://www.7pcb.com/blog/lead-free-reflow-profile.php
 const static solder_profile_t PROGMEM profiles[] = {
-    {4, {25, 105, 115, 155}, {65.0, 78.0, 81.0, 100.0}},
-    {2, {162.0, 202.0}, {95.0, 100.0}}};
+    {4, {25, 105, 115, 155}, {65.0, 78.0, 81.0, 100.0}}, {2, {162.0, 202.0}, {95.0, 100.0}}};
 
 // temperature must be within this range to move on to next step
 #define TARGET_TEMP_THRESHOLD 5.0
@@ -135,20 +141,27 @@ float kP = 1.0;
 float I_clip = 50;
 float error_I = 0;
 
-// -------------------- Function prototypes -----------------------------------
-void inline heatAnimate(int &x, int &y, float v, float t);
+// Optional temperature sensor
+#define ONE_WIRE_BUS 2
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+int sensor_count = 0;
+DeviceAddress addresses[3];
+/
+    // -------------------- Function prototypes -----------------------------------
+    void inline heatAnimate(int &x, int &y, float v, float t);
 
 // -------------------- Function definitions ----------------------------------
 
 void setup() {
 
     // Pin Direction control
-    pinMode(mosfet, OUTPUT);
-    digitalWrite(mosfet, LOW);
-    pinMode(upsw, INPUT);
-    pinMode(dnsw, INPUT);
-    pinMode(temp, INPUT);
-    pinMode(vcc, INPUT);
+    pinMode(MOSFET_PIN, OUTPUT);
+    digitalWrite(MOSFET_PIN, LOW);
+    pinMode(UPSW_PIN, INPUT);
+    pinMode(DNSW_PIN, INPUT);
+    pinMode(TEMP_PIN, INPUT);
+    pinMode(VCC_PIN, INPUT);
 
     // Pull saved values from EEPROM
     max_temp_index = EEPROM.read(tempIndexAddr) % sizeof(max_temp_array);
@@ -161,6 +174,16 @@ void setup() {
 
     // Go to main menu
     mainMenu();
+
+    // check onewire TEMP_PIN sensors
+    setupSensors();
+}
+
+inline void setupSensors() {
+    sensor_count = sensors.getDeviceCount();
+    for (int i = 0; i < min(sensor_count, sizeof(addresses)); i++) {
+        addresses[i] = sensors.search(addresses[i]);
+    }
 }
 
 inline void setFastPwm() {
@@ -187,7 +210,7 @@ void showLogo() {
 
 void mainMenu() {
     // Debounce
-    while (!digitalRead(upsw) || !digitalRead(dnsw))
+    while (!digitalRead(UPSW_PIN) || !digitalRead(DNSW_PIN))
         ;
     menu_state_t cur_state = MENU_IDLE;
 
@@ -198,7 +221,7 @@ void mainMenu() {
     while (1) {
         switch (cur_state) {
         case MENU_IDLE: {
-            analogWrite(mosfet, 0); // Ensure MOSFET off
+            analogWrite(MOSFET_PIN, 0); // Ensure MOSFET off
             clearMainMenu();
             buttons_state_t cur_button = getButtonsState();
 
@@ -249,13 +272,13 @@ void mainMenu() {
 
 // TODO(HEIDT) change to a down-up model or we'll loop forever in these cases
 buttons_state_t getButtonsState() {
-    if (digitalRead(upsw) && digitalRead(dnsw)) {
+    if (digitalRead(UPSW_PIN) && digitalRead(DNSW_PIN)) {
         return BUTTONS_NO_PRESS;
     } else {
         delay(100);
-        if (!digitalRead(upsw) && !digitalRead(dnsw)) {
+        if (!digitalRead(UPSW_PIN) && !digitalRead(DNSW_PIN)) {
             return BUTTONS_BOTH_PRESS;
-        } else if (digitalRead(upsw)) {
+        } else if (digitalRead(UPSW_PIN)) {
             return BUTTONS_UP_PRESS;
         } else {
             return BUTTONS_DN_PRESS;
@@ -264,7 +287,7 @@ buttons_state_t getButtonsState() {
 
     // wait for up on both switches
     // TODO(HEIDT) holding down switches will block execution flow, address
-    while (!digitalRead(upsw) || !digitalRead(dnsw))
+    while (!digitalRead(UPSW_PIN) || !digitalRead(DNSW_PIN))
         ;
 }
 
@@ -303,13 +326,13 @@ inline void displayProfileRight(int8_t cur_profile) {
 
     for (int i = 0; i < profiles[cur_profile].points; i++) {
         int x_next = (int)((profiles[cur_profile].seconds[i] / total_seconds) * x_dist) + 90;
-        int y_next = 30 - (int)(profiles[cur_profile].fraction[i] * 28) ;
+        int y_next = 30 - (int)(profiles[cur_profile].fraction[i] * 28);
         display.drawLine(cur_x, cur_y, x_next, y_next, SSD1306_WHITE);
         cur_x = x_next;
         cur_y = y_next;
     }
-    // draw down to finish temp
-    display.drawLine(cur_x, cur_y, SCREEN_WIDTH-2, 30, SSD1306_WHITE);
+    // draw down to finish TEMP_PIN
+    display.drawLine(cur_x, cur_y, SCREEN_WIDTH - 2, 30, SSD1306_WHITE);
 }
 
 inline void clearMainMenu() {
@@ -360,15 +383,15 @@ inline void showHeatMenu(byte max_temp) {
 
 bool heat(byte max_temp, int profile_index) {
     // Debounce
-    while (!digitalRead(upsw) || !digitalRead(dnsw)) {
+    while (!digitalRead(UPSW_PIN) || !digitalRead(DNSW_PIN)) {
     }
 
     // Heating Display
     showHeatMenu(max_temp);
     delay(3000);
 
-    float t;          // Used to store current temperature
-    float v;          // Used to store current voltage
+    float t; // Used to store current temperature
+    float v; // Used to store current voltage
 
     unsigned long profile_max_time = millis() / 1000 + (8 * 60);
     unsigned long step_start_time = (millis() / 1000);
@@ -379,7 +402,7 @@ bool heat(byte max_temp, int profile_index) {
     int y = 80; // Heat Animate max (modulused below)
 
     float start_temp = getTemp();
-    float goal_temp = profiles[profile_index].fraction[0]*max_temp;
+    float goal_temp = profiles[profile_index].fraction[0] * max_temp;
     float step_runtime = profiles[profile_index].seconds[0];
     float last_time = step_start_time;
     float last_temp = getTemp();
@@ -388,13 +411,13 @@ bool heat(byte max_temp, int profile_index) {
     while (1) {
         // Cancel heat
         if (getButtonsState() != BUTTONS_NO_PRESS) {
-            analogWrite(mosfet, 0);
+            analogWrite(MOSFET_PIN, 0);
             return 0;
         }
 
         // Check Heating not taken more than 8 minutes
         if (millis() / 1000 > profile_max_time) {
-            analogWrite(mosfet, 0);
+            analogWrite(MOSFET_PIN, 0);
             cancelledTimer();
             return 0;
         }
@@ -403,32 +426,36 @@ bool heat(byte max_temp, int profile_index) {
         t = getTemp();
         v = getVolts();
 
+        // Determine what target temp is and PID to it
         float time_into_step = ((float)millis() / 1000.0) - (float)step_start_time;
-        float target_temp = min(((goal_temp - start_temp) * (time_into_step / step_runtime)) + start_temp, goal_temp);
+        float target_temp = min(
+            ((goal_temp - start_temp) * (time_into_step / step_runtime)) + start_temp, goal_temp);
+            
+        // TODO(HEIDT) PID for a ramp will always lag, other options may be better
         stepPID(target_temp, t, last_temp, time_into_step - last_time);
         last_time = time_into_step;
 
         // if we finish the step timewise
-        if(time_into_step >= step_runtime) {
+        if (time_into_step >= step_runtime) {
             // and if we're within the goal temperature of the step
-            if(abs(t - goal_temp) < TARGET_TEMP_THRESHOLD) {
+            if (abs(t - goal_temp) < TARGET_TEMP_THRESHOLD) {
                 // move onto the next step in the profile
                 current_step++;
                 // if that was the last step, we're done!
-                if(current_step == profiles[profile_index].points) {
-                    analogWrite(mosfet, 0);
+                if (current_step == profiles[profile_index].points) {
+                    analogWrite(MOSFET_PIN, 0);
                     return 1;
-              }
+                }
                 // otherwise, get the next goal temperature and runtime, and do the process again
                 start_temp = t;
                 goal_temp = profiles[profile_index].fraction[current_step];
-                step_runtime = profiles[profile_index].fraction[current_step] - profiles[profile_index].fraction[current_step - 1];
+                step_runtime = profiles[profile_index].fraction[current_step] -
+                               profiles[profile_index].fraction[current_step - 1];
                 step_start_time = millis() / 1000.0;
             }
         }
 
         heatAnimate(x, y, v, t);
-
     }
 }
 
@@ -436,17 +463,21 @@ void stepPID(float target_temp, float current_temp, float last_temp, float dt) {
     float error = target_temp - current_temp;
     float D = (current_temp - last_temp) / dt;
 
-    error_I += error*dt; 
-    if(error_I > I_clip) {
+    error_I += error * dt;
+    if (error_I > I_clip) {
         error_I = I_clip;
-    } else if(error_I < -1*I_clip) {
-        error_I = -1*I_clip;
+    } else if (error_I < -1 * I_clip) {
+        error_I = -1 * I_clip;
     }
 
-    float PWM = error*kP + D*kD + error_I*kI;
-    if (PWM > 255) {PWM = 255;}
-    if (PWM < 0) {PWM = 0;}
-    analogWrite(mosfet, (int)PWM);
+    float PWM = error * kP + D * kD + error_I * kI;
+    if (PWM > 200) {
+        PWM = 200;
+    }
+    if (PWM < 0) {
+        PWM = 0;
+    }
+    analogWrite(MOSFET_PIN, (int)PWM);
 }
 
 void inline heatAnimate(int &x, int &y, float v, float t) {
@@ -483,7 +514,7 @@ void inline heatAnimate(int &x, int &y, float v, float t) {
 
 void cancelledPB() { // Cancelled via push button
     // Debounce
-    while (!digitalRead(upsw) || !digitalRead(dnsw)) {
+    while (!digitalRead(UPSW_PIN) || !digitalRead(DNSW_PIN)) {
     }
 
     // Update Display
@@ -513,7 +544,7 @@ void cancelledPB() { // Cancelled via push button
 
 void cancelledTimer() { // Cancelled via 5 minute Time Limit
     // Debounce
-    while (!digitalRead(upsw) || !digitalRead(dnsw)) {
+    while (!digitalRead(UPSW_PIN) || !digitalRead(DNSW_PIN)) {
     }
 
     // Initiate Swap Display
@@ -562,13 +593,13 @@ void cancelledTimer() { // Cancelled via 5 minute Time Limit
 
 void coolDown() {
     // Debounce
-    while (!digitalRead(upsw) || !digitalRead(dnsw)) {
+    while (!digitalRead(UPSW_PIN) || !digitalRead(DNSW_PIN)) {
     }
 
     float t = getTemp(); // Used to store current temperature
 
-    // Wait to return on any button press, or temp below threshold
-    while (digitalRead(upsw) && digitalRead(dnsw) && t > 45.00) {
+    // Wait to return on any button press, or TEMP_PIN below threshold
+    while (digitalRead(UPSW_PIN) && digitalRead(DNSW_PIN) && t > 45.00) {
         display.clearDisplay();
         display.drawRoundRect(22, 0, 84, 32, 2, SSD1306_WHITE);
         display.setCursor(25, 4);
@@ -598,7 +629,7 @@ void coolDown() {
 
 void completed() {
     // Debounce
-    while (!digitalRead(upsw) || !digitalRead(dnsw)) {
+    while (!digitalRead(UPSW_PIN) || !digitalRead(DNSW_PIN)) {
     }
 
     // Update Display
@@ -616,22 +647,28 @@ void completed() {
     display.display();
 
     // Wait to return on any button press
-    while (digitalRead(upsw) && digitalRead(dnsw)) {
+    while (digitalRead(UPSW_PIN) && digitalRead(DNSW_PIN)) {
     }
 }
 
 float getTemp() {
     float t = 0;
-    for (byte i = 0; i < 100; i++) { // Poll temp reading 100 times
-        t = t + analogRead(temp);
+    for (byte i = 0; i < 100; i++) { // Poll TEMP_PIN reading 100 times
+        t = t + analogRead(TEMP_PIN);
     }
-    return ((t / 100) * -1.46) + 434; // Average, convert to C, and return
+    t = ((t / 100) * -1.46) + 434;
+
+    // return the maximum of all the temperature sensors for safety
+    for (int i = 0; i < sensor_count; i++) {
+        t = max(t, sensors.getTempC(addresses[i]));
+    }
+    return t;
 }
 
 float getVolts() {
     float v = 0;
     for (byte i = 0; i < 20; i++) { // Poll Voltage reading 20 times
-        v = v + analogRead(vcc);
+        v = v + analogRead(VCC_PIN);
     }
     return v / 20 / vConvert; // Average, convert to V, and return
 }
